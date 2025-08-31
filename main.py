@@ -1,8 +1,8 @@
 import os
 import logging
 from datetime import datetime, timedelta
-from telegram import Update
-from telegram.ext import Updater, CommandHandler, CallbackContext, ChatMemberHandler
+import telebot
+from telebot.types import ChatMemberUpdated
 import pytz
 
 # Enable logging
@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 CHANNEL_ID = os.environ.get('CHANNEL_ID')
 
+# Initialize bot
+bot = telebot.TeleBot(BOT_TOKEN)
+
 # Store member join times
 member_join_times = {}
 
@@ -27,9 +30,10 @@ def get_utc_time():
     """Get current UTC time consistently"""
     return datetime.now(pytz.utc)
 
-def start(update: Update, context: CallbackContext):
+@bot.message_handler(commands=['start'])
+def start(message):
     """Welcome message"""
-    update.message.reply_text(
+    bot.reply_to(message,
         "👋 Hi! I'm your channel member management bot.\n\n"
         "I track when members join and can remove them based on join time.\n\n"
         "📝 Usage:\n"
@@ -38,39 +42,17 @@ def start(update: Update, context: CallbackContext):
         "/remove_by_time 2023-08-01 12:00:00"
     )
 
-def track_chat_members(update: Update, context: CallbackContext):
-    """Track when members join the channel"""
-    try:
-        if str(update.chat_member.chat.id) != str(CHANNEL_ID):
-            return
-            
-        user = update.chat_member.new_chat_member.user
-        old_status = update.chat_member.old_chat_member.status
-        new_status = update.chat_member.new_chat_member.status
-        
-        # Check if this is a new member joining
-        if old_status in ['left', 'kicked'] and new_status in ['member', 'administrator', 'creator']:
-            join_time = get_utc_time()
-            member_join_times[user.id] = join_time
-            
-            # Store username for debugging
-            if user.username:
-                member_join_times[f"{user.id}_username"] = user.username
-                
-            logger.info(f"User @{user.username} ({user.id}) joined at {join_time}")
-            
-    except Exception as e:
-        logger.error(f"Error in track_chat_members: {e}")
-
-def remove_by_time(update: Update, context: CallbackContext):
+@bot.message_handler(commands=['remove_by_time'])
+def remove_by_time(message):
     """Remove members who joined during a specific time"""
     try:
-        if update.message.chat.type != 'private':
-            update.message.reply_text("Please use this command in a private chat with me.")
+        if message.chat.type != 'private':
+            bot.reply_to(message, "Please use this command in a private chat with me.")
             return
             
-        if len(context.args) < 1:
-            update.message.reply_text(
+        args = message.text.split()[1:]
+        if len(args) < 1:
+            bot.reply_to(message,
                 "❌ Usage: /remove_by_time YYYY-MM-DD HH:MM:SS\n\n"
                 "Example:\n"
                 "/remove_by_time 2023-08-01 12:00:00\n\n"
@@ -79,7 +61,7 @@ def remove_by_time(update: Update, context: CallbackContext):
             return
             
         # Parse the time input
-        time_str = ' '.join(context.args[0:2]) if len(context.args) >= 2 else context.args[0] + " 00:00:00"
+        time_str = ' '.join(args[0:2]) if len(args) >= 2 else args[0] + " 00:00:00"
         target_time = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=pytz.utc)
         
         # 1-minute window around target time
@@ -100,7 +82,7 @@ def remove_by_time(update: Update, context: CallbackContext):
             try:
                 username = member_join_times.get(f"{user_id}_username", "Unknown")
                 
-                context.bot.ban_chat_member(
+                bot.ban_chat_member(
                     chat_id=CHANNEL_ID, 
                     user_id=user_id,
                     until_date=datetime.now() + timedelta(seconds=30)
@@ -119,18 +101,19 @@ def remove_by_time(update: Update, context: CallbackContext):
                 removal_report += f"❌ Failed to remove user {user_id}: {e}\n"
         
         removal_report += f"\nTotal removed: {removed_count}"
-        update.message.reply_text(removal_report)
+        bot.reply_to(message, removal_report)
         
     except ValueError:
-        update.message.reply_text("❌ Invalid time format. Please use: YYYY-MM-DD HH:MM:SS")
+        bot.reply_to(message, "❌ Invalid time format. Please use: YYYY-MM-DD HH:MM:SS")
     except Exception as e:
         logger.error(f"Error in remove_by_time: {e}")
-        update.message.reply_text(f"❌ Error: {e}")
+        bot.reply_to(message, f"❌ Error: {e}")
 
-def list_members(update: Update, context: CallbackContext):
+@bot.message_handler(commands=['list_members'])
+def list_members(message):
     """List tracked members (for debugging)"""
     if not member_join_times:
-        update.message.reply_text("No members tracked yet.")
+        bot.reply_to(message, "No members tracked yet.")
         return
         
     report = "📊 Tracked Members:\n\n"
@@ -139,27 +122,36 @@ def list_members(update: Update, context: CallbackContext):
             username = member_join_times.get(f"{user_id}_username", "Unknown")
             report += f"👤 @{username} - Joined: {join_time}\n"
     
-    update.message.reply_text(report[:4000])  # Telegram message limit
+    bot.reply_to(message, report[:4000])  # Telegram message limit
 
-def main():
-    """Start the bot"""
-    if not BOT_TOKEN or not CHANNEL_ID:
-        logger.error("Missing BOT_TOKEN or CHANNEL_ID environment variables")
-        return
+@bot.chat_member_handler()
+def track_chat_members(chat_member_updated):
+    """Track when members join the channel"""
+    try:
+        if str(chat_member_updated.chat.id) != str(CHANNEL_ID):
+            return
+            
+        user = chat_member_updated.new_chat_member.user
+        old_status = chat_member_updated.old_chat_member.status
+        new_status = chat_member_updated.new_chat_member.status
         
-    updater = Updater(BOT_TOKEN)
-    dispatcher = updater.dispatcher
-
-    # Add handlers
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(CommandHandler("remove_by_time", remove_by_time))
-    dispatcher.add_handler(CommandHandler("list_members", list_members))
-    dispatcher.add_handler(ChatMemberHandler(track_chat_members))
-
-    # Start the bot
-    updater.start_polling()
-    logger.info("Bot started successfully!")
-    updater.idle()
+        # Check if this is a new member joining
+        if old_status in ['left', 'kicked'] and new_status in ['member', 'administrator', 'creator']:
+            join_time = get_utc_time()
+            member_join_times[user.id] = join_time
+            
+            # Store username for debugging
+            if user.username:
+                member_join_times[f"{user.id}_username"] = user.username
+                
+            logger.info(f"User @{user.username} ({user.id}) joined at {join_time}")
+            
+    except Exception as e:
+        logger.error(f"Error in track_chat_members: {e}")
 
 if __name__ == '__main__':
-    main()
+    if not BOT_TOKEN or not CHANNEL_ID:
+        logger.error("Missing BOT_TOKEN or CHANNEL_ID environment variables")
+    else:
+        logger.info("Bot started successfully!")
+        bot.infinity_polling()
