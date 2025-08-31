@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 # Configuration
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 CHANNEL_ID = os.environ.get('CHANNEL_ID')
+RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL', 'https://telegram-channel-bot-ah15.onrender.com')
 
 if not BOT_TOKEN or not CHANNEL_ID:
     logger.error("Missing BOT_TOKEN or CHANNEL_ID environment variables")
@@ -29,16 +30,9 @@ bot = telebot.TeleBot(BOT_TOKEN)
 # Store member join times
 member_join_times = {}
 
-# Set webhook
-try:
-    bot.remove_webhook()
-    # We'll set the webhook after the Flask app starts
-except:
-    pass
-
 @app.route('/')
 def index():
-    return 'Bot is running!'
+    return '🤖 Bot is running! Use Telegram to interact with me.'
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -57,7 +51,9 @@ def send_welcome(message):
         "To remove members who joined at a specific time:\n"
         "/remove YYYY-MM-DD HH:MM:SS\n\n"
         "Example:\n"
-        "/remove 2023-08-01 14:30:00"
+        "/remove 2023-08-01 14:30:00\n\n"
+        "Check status:\n"
+        "/status"
     )
 
 @bot.message_handler(commands=['remove'])
@@ -143,28 +139,27 @@ def show_status(message):
 def set_webhook():
     """Set webhook for the bot"""
     try:
-        # Get the Render external URL
-        render_url = os.environ.get('RENDER_EXTERNAL_URL')
-        if not render_url:
-            logger.error("RENDER_EXTERNAL_URL environment variable is not set")
-            return False
-            
-        webhook_url = f"{render_url}/webhook"
+        webhook_url = f"{RENDER_URL}/webhook"
         bot.remove_webhook()
-        bot.set_webhook(url=webhook_url)
-        logger.info(f"Webhook set to: {webhook_url}")
-        return True
+        success = bot.set_webhook(url=webhook_url)
+        if success:
+            logger.info(f"✅ Webhook set to: {webhook_url}")
+            return True
+        else:
+            logger.error("❌ Failed to set webhook")
+            return False
     except Exception as e:
         logger.error(f"Error setting webhook: {e}")
         return False
 
-if __name__ == '__main__':
-    logger.info("Starting bot with webhooks...")
-    
-    # Set webhook
+# Set webhook when the app starts
+with app.app_context():
     if set_webhook():
-        # Start Flask app
-        port = int(os.environ.get('PORT', 5000))
-        app.run(host='0.0.0.0', port=port)
+        logger.info("✅ Webhook configured successfully")
     else:
-        logger.error("Failed to set webhook. Bot cannot start.")
+        logger.error("❌ Webhook configuration failed")
+
+if __name__ == '__main__':
+    logger.info("🚀 Starting bot with webhooks...")
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
