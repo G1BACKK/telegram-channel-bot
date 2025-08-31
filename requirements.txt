@@ -1,2 +1,2 @@
-python-telegram-bot==13.7
-pytz==2021.1
+pytelegrambotapi==4.14.1
+pytz==2023.3
