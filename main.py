@@ -1,9 +1,12 @@
 import os
 import logging
-import time
 from datetime import datetime, timedelta
+from flask import Flask, request
 import telebot
 import pytz
+
+# Initialize Flask app
+app = Flask(__name__)
 
 # Enable logging
 logging.basicConfig(
@@ -12,15 +15,39 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configuration - Set these in Render environment variables
+# Configuration
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 CHANNEL_ID = os.environ.get('CHANNEL_ID')
+
+if not BOT_TOKEN or not CHANNEL_ID:
+    logger.error("Missing BOT_TOKEN or CHANNEL_ID environment variables")
+    exit(1)
 
 # Initialize bot
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # Store member join times
 member_join_times = {}
+
+# Set webhook
+try:
+    bot.remove_webhook()
+    # We'll set the webhook after the Flask app starts
+except:
+    pass
+
+@app.route('/')
+def index():
+    return 'Bot is running!'
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return 'OK', 200
+    return 'Forbidden', 403
 
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
@@ -36,12 +63,10 @@ def send_welcome(message):
 @bot.message_handler(commands=['remove'])
 def remove_members(message):
     try:
-        # Check if command is sent in private chat
         if message.chat.type != 'private':
             bot.reply_to(message, "Please use this command in a private chat with me.")
             return
             
-        # Parse command arguments
         args = message.text.split()
         if len(args) < 2:
             bot.reply_to(message,
@@ -52,13 +77,11 @@ def remove_members(message):
             )
             return
             
-        # Parse time (handle with/without time)
+        # Parse time
         time_parts = args[1:]
         if len(time_parts) == 1:
-            # Only date provided, assume midnight
             time_str = time_parts[0] + " 00:00:00"
         else:
-            # Date and time provided
             time_str = ' '.join(time_parts[0:2])
             
         target_time = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=pytz.UTC)
@@ -69,30 +92,18 @@ def remove_members(message):
         
         # Find and remove users
         removed_count = 0
-        users_to_remove = []
         
         for user_id, join_time in list(member_join_times.items()):
             if not isinstance(join_time, datetime):
                 continue
                 
             if start_time <= join_time <= end_time:
-                users_to_remove.append(user_id)
-        
-        # Remove users from channel
-        for user_id in users_to_remove:
-            try:
-                bot.ban_chat_member(
-                    chat_id=CHANNEL_ID, 
-                    user_id=user_id,
-                    until_date=datetime.now() + timedelta(seconds=30)
-                )
-                removed_count += 1
-                # Remove from tracking
-                if user_id in member_join_times:
+                try:
+                    bot.ban_chat_member(CHANNEL_ID, user_id, until_date=datetime.now() + timedelta(seconds=30))
+                    removed_count += 1
                     del member_join_times[user_id]
-                    
-            except Exception as e:
-                logger.error(f"Failed to remove user {user_id}: {e}")
+                except Exception as e:
+                    logger.error(f"Failed to remove user {user_id}: {e}")
         
         bot.reply_to(message, f"✅ Removed {removed_count} members who joined around {target_time}")
         
@@ -106,7 +117,6 @@ def remove_members(message):
 def track_new_members(chat_member_updated):
     """Track when new members join the channel"""
     try:
-        # Only track members in our target channel
         if str(chat_member_updated.chat.id) != str(CHANNEL_ID):
             return
             
@@ -114,7 +124,6 @@ def track_new_members(chat_member_updated):
         old_status = chat_member_updated.old_chat_member.status
         new_status = chat_member_updated.new_chat_member.status
         
-        # Check if this is a new member joining
         if (old_status in ['left', 'kicked', 'restricted'] and 
             new_status in ['member', 'administrator', 'creator']):
             
@@ -131,29 +140,31 @@ def show_status(message):
     tracked_count = len([uid for uid in member_join_times.keys() if not isinstance(uid, str)])
     bot.reply_to(message, f"📊 Currently tracking {tracked_count} channel members")
 
-def start_bot():
-    """Start the bot with error handling"""
-    logger.info("Starting bot...")
-    
-    # Try to remove any existing webhook (just in case)
+def set_webhook():
+    """Set webhook for the bot"""
     try:
+        # Get the Render external URL
+        render_url = os.environ.get('RENDER_EXTERNAL_URL')
+        if not render_url:
+            logger.error("RENDER_EXTERNAL_URL environment variable is not set")
+            return False
+            
+        webhook_url = f"{render_url}/webhook"
         bot.remove_webhook()
-    except:
-        pass
-        
-    # Start polling with error recovery
-    while True:
-        try:
-            logger.info("Beginning to poll Telegram API...")
-            bot.infinity_polling()
-        except Exception as e:
-            logger.error(f"Polling error: {e}. Restarting in 10 seconds...")
-            time.sleep(10)
+        bot.set_webhook(url=webhook_url)
+        logger.info(f"Webhook set to: {webhook_url}")
+        return True
+    except Exception as e:
+        logger.error(f"Error setting webhook: {e}")
+        return False
 
 if __name__ == '__main__':
-    # Check if required environment variables are set
-    if not BOT_TOKEN or not CHANNEL_ID:
-        logger.error("Missing BOT_TOKEN or CHANNEL_ID environment variables")
-        logger.error("Please set these in your Render environment variables")
+    logger.info("Starting bot with webhooks...")
+    
+    # Set webhook
+    if set_webhook():
+        # Start Flask app
+        port = int(os.environ.get('PORT', 5000))
+        app.run(host='0.0.0.0', port=port)
     else:
-        start_bot()
+        logger.error("Failed to set webhook. Bot cannot start.")
